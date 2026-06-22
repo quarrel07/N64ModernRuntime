@@ -895,10 +895,14 @@ void recomp::start(
     graphics_shutdown_ready.signal();
 
     game_thread.join();
+    // Stop the timer thread before freeing RDRAM. The game thread is its only producer, so once that
+    // is joined no new timers can be added. Without this the detached timer thread outlives RDRAM
+    // teardown and faults during process exit (SIGSEGV on quit, especially with background audio).
+    ultramodern::join_timer_thread();
     ultramodern::join_event_threads();
     ultramodern::join_thread_cleaner_thread();
     ultramodern::join_saving_thread();
-    
+
     // Free rdram.
     bool free_failed;
 #ifdef _WIN32

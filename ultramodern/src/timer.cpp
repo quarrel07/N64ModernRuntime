@@ -37,7 +37,10 @@ struct RemoveTimerAction {
     PTR(OSTimer) timer;
 };
 
-using Action = std::variant<AddTimerAction, RemoveTimerAction>;
+// Signals the timer thread to exit its loop so it can be joined during shutdown.
+struct StopTimerAction {};
+
+using Action = std::variant<AddTimerAction, RemoveTimerAction, StopTimerAction>;
 
 struct {
     std::thread thread;
@@ -87,6 +90,9 @@ void timer_thread(RDRAM_ARG1) {
     // Ordered set of timers that are currently active
     std::set<PTR(OSTimer), decltype(timer_sort)> active_timers{timer_sort};
     
+    // Set to false when a StopTimerAction is received so the thread can exit and be joined.
+    bool running = true;
+
     // Lambda to process a timer action to handle adding and removing timers
     auto process_timer_action = [&](const Action& action) {
         // Determine the action type and act on it
@@ -94,20 +100,28 @@ void timer_thread(RDRAM_ARG1) {
             active_timers.insert(add_action->timer);
         } else if (const auto* remove_action = std::get_if<RemoveTimerAction>(&action)) {
             active_timers.erase(remove_action->timer);
+        } else if (std::get_if<StopTimerAction>(&action)) {
+            running = false;
         }
     };
 
-    while (true) {
+    while (running) {
         // Empty the action queue
         Action cur_action;
         while (timer_context.action_queue.try_dequeue(cur_action)) {
             process_timer_action(cur_action);
         }
+        if (!running) {
+            break;
+        }
 
         // If there's no timer to act on, wait for one to come in from the action queue
-        while (active_timers.empty()) {
+        while (running && active_timers.empty()) {
             timer_context.action_queue.wait_dequeue(cur_action);
             process_timer_action(cur_action);
+        }
+        if (!running) {
+            break;
         }
 
         // Get the timer that's closest to running out
@@ -141,8 +155,19 @@ void timer_thread(RDRAM_ARG1) {
 }
 
 void ultramodern::init_timers(RDRAM_ARG1) {
+    // Stop any previously-running timer thread (e.g. across a soft reset) before starting a new one.
+    ultramodern::join_timer_thread();
     timer_context.thread = std::thread{ timer_thread, PASS_RDRAM1 };
-    timer_context.thread.detach();
+}
+
+void ultramodern::join_timer_thread() {
+    if (timer_context.thread.joinable()) {
+        // Ask the timer thread to exit its loop, then wait for it. This must happen before RDRAM is
+        // freed during shutdown; otherwise the thread races teardown and dereferences freed memory
+        // (observed as a SIGSEGV on quit, made far more likely when system audio teardown delays exit).
+        timer_context.action_queue.enqueue(StopTimerAction{});
+        timer_context.thread.join();
+    }
 }
 
 uint32_t ultramodern::get_speed_multiplier() {

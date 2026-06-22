@@ -126,6 +126,8 @@ void quit();
 void join_event_threads();
 void join_thread_cleaner_thread();
 void join_saving_thread();
+// Stops and joins the timer thread. Must be called during shutdown before RDRAM is freed.
+void join_timer_thread();
 
 void set_audio_callbacks(const audio_callbacks_t& callbacks);
 
